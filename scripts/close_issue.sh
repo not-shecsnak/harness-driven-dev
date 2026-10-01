@@ -16,6 +16,13 @@ set -euo pipefail
 ISSUE_ID="${1:-}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
+# ── Attempt counter (feeds the "gates passed on first try" metric) ──
+# Lives in the git dir so it is never committed and is shared across worktrees.
+ATTEMPTS_DIR="$(git rev-parse --git-common-dir 2>/dev/null || echo .git)/hdd-attempts"
+mkdir -p "$ATTEMPTS_DIR" 2>/dev/null || true
+ATTEMPTS=$(( $(cat "$ATTEMPTS_DIR/$ISSUE_ID" 2>/dev/null || echo 0) + 1 ))
+echo "$ATTEMPTS" > "$ATTEMPTS_DIR/$ISSUE_ID" 2>/dev/null || true
+
 # ── Colors ──
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -191,7 +198,7 @@ if [ "$GATES_PASSED" -eq "$GATES_TOTAL" ]; then
 - **Autor**: ${COMMIT_AUTHOR}
 - **Fecha commit**: ${COMMIT_DATE}
 - **Mensaje**: ${COMMIT_MSG}
-$([ -n "$PR_LINK" ] && echo "- **PR**: ${PR_LINK}")
+$([ -n "$PR_LINK" ] && echo "- **PR**: ${PR_LINK}" || true)
 
 **Diff stats**
 
@@ -212,7 +219,7 @@ ${FILES_CHANGED}
 ### 4. Quality Gates
 
 - **Gate 1 — Tests**: PASS (${TESTS_PASSED})
-- **Gate 2 — CI/CD**: ${CI_STATUS_TEXT}$([ -n "$CI_RUN_LINK" ] && echo " — ${CI_RUN_LINK}")
+- **Gate 2 — CI/CD**: ${CI_STATUS_TEXT}$([ -n "$CI_RUN_LINK" ] && echo " — ${CI_RUN_LINK}" || true)
 - **Gate 3 — Acceptance Criteria**: PASS (${AC_CHECKED}/${AC_TOTAL} checked)
 
 ### 5. Audit Trail
@@ -232,6 +239,53 @@ ${FILES_CHANGED}
     python3 "$SCRIPT_DIR/linear_client.py" move "$ISSUE_ID" "Done" 2>/dev/null || true
 
     echo "Evidence posted and issue moved to Done."
+
+    # ── Obsidian vault note + agent metrics (best effort, never blocks the close) ──
+    # Context comes from the orchestrator via env: HDD_AGENT, HDD_PARENT, HDD_TASK_TYPE
+    REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+    VAULT_DIR="$REPO_ROOT/.claude/vault"
+    mkdir -p "$VAULT_DIR/_metrics"
+    AGENT="${HDD_AGENT:-unassigned}"
+    TASK_TYPE="${HDD_TASK_TYPE:-$(echo "$BRANCH" | cut -d/ -f1)}"
+    ISSUE_JSON=$(python3 "$SCRIPT_DIR/linear_client.py" get "$ISSUE_ID" --json 2>/dev/null || echo "{}")
+    ISSUE_TITLE=$(echo "$ISSUE_JSON" | python3 -c "import sys,json; print(json.load(sys.stdin).get('title',''))" 2>/dev/null || echo "")
+    PARENT="${HDD_PARENT:-$(echo "$ISSUE_JSON" | python3 -c "import sys,json; print((json.load(sys.stdin).get('parent') or {}).get('identifier',''))" 2>/dev/null || echo "")}"
+    if [ "$ATTEMPTS" -eq 1 ]; then GATES_FIRST_TRY=true; else GATES_FIRST_TRY=false; fi
+    PR_FM=""
+    [ -n "${PR_NUM:-}" ] && PR_FM="#${PR_NUM}"
+    NOTE="$VAULT_DIR/$ISSUE_ID.md"
+
+    if [ -f "$NOTE" ]; then
+        # Existing note (e.g. the feature parent written by /plan-feature): append, never overwrite.
+        {
+            echo ""
+            echo "## Cierre — ${TIMESTAMP}"
+            echo "- Gates: ${GATES_PASSED}/${GATES_TOTAL} (intentos: ${ATTEMPTS}) · Agente: ${AGENT} · PR: ${PR_FM:-n/a}"
+        } >> "$NOTE"
+    else
+        {
+            echo "---"
+            echo "issue: ${ISSUE_ID}"
+            echo "parent: ${PARENT:-null}"
+            echo "agente: ${AGENT}"
+            echo "fecha: ${TIMESTAMP}"
+            echo "pr: ${PR_FM:-null}"
+            echo "gates: \"${GATES_PASSED}/${GATES_TOTAL} (tests, ci, criteria)\""
+            echo "intentos: ${ATTEMPTS}"
+            echo "---"
+            echo ""
+            echo "# ${ISSUE_ID} — ${ISSUE_TITLE:-$COMMIT_MSG}"
+            echo ""
+            [ -n "$PARENT" ] && echo "Feature: [[${PARENT}]]"
+            [ -n "$PR_LINK" ] && echo "PR: ${PR_LINK}"
+            echo "Commit: \`${COMMIT_SHA}\`"
+        } > "$NOTE"
+    fi
+    echo "Vault note: .claude/vault/$ISSUE_ID.md"
+
+    python3 "$SCRIPT_DIR/agent_performance_log.py" record "$ISSUE_ID"         ${PARENT:+--parent "$PARENT"} --agent "$AGENT" --task-type "$TASK_TYPE"         --gates-first-try "$GATES_FIRST_TRY" --branch "$BRANCH" 2>/dev/null || true
+
+    rm -f "$ATTEMPTS_DIR/$ISSUE_ID" 2>/dev/null || true
     exit 0
 else
     echo -e "${RED}  BLOCKED ($GATES_PASSED/$GATES_TOTAL passed)${NC}"
