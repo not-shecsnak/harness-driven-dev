@@ -16,13 +16,6 @@ set -euo pipefail
 ISSUE_ID="${1:-}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
-# ── Attempt counter (feeds the "gates passed on first try" metric) ──
-# Lives in the git dir so it is never committed and is shared across worktrees.
-ATTEMPTS_DIR="$(git rev-parse --git-common-dir 2>/dev/null || echo .git)/hdd-attempts"
-mkdir -p "$ATTEMPTS_DIR" 2>/dev/null || true
-ATTEMPTS=$(( $(cat "$ATTEMPTS_DIR/$ISSUE_ID" 2>/dev/null || echo 0) + 1 ))
-echo "$ATTEMPTS" > "$ATTEMPTS_DIR/$ISSUE_ID" 2>/dev/null || true
-
 # ── Colors ──
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -33,6 +26,37 @@ if [ -z "$ISSUE_ID" ]; then
     echo -e "${RED}Usage: bash scripts/close_issue.sh <ISSUE_ID>${NC}"
     exit 1
 fi
+
+# ── Preflight: a gate that cannot run must FAIL the close, never be skipped ──
+# Exit codes: 0 = closed, 1 = a gate failed, 2 = environment broken (could not validate).
+env_broken() {
+    echo "" >&2
+    echo -e "${RED}ENVIRONMENT BROKEN — could not validate: $1${NC}" >&2
+    echo "  $ISSUE_ID was NOT closed. Fix the environment and run again." >&2
+    # An environment failure is not the agent's failed attempt: undo the counter bump.
+    if [ -n "${ATTEMPTS:-}" ]; then echo "$((ATTEMPTS - 1))" > "$ATTEMPTS_DIR/$ISSUE_ID" 2>/dev/null || true; fi
+    exit 2
+}
+
+# On Windows, `python3` can be the Microsoft Store stub (prints "Python was not
+# found" and exits non-zero). Only trust an interpreter that actually runs Python 3.
+PY=""
+for cand in python3 python; do
+    if command -v "$cand" >/dev/null 2>&1         && [ "$("$cand" -c 'import sys; print(sys.version_info[0])' 2>/dev/null)" = "3" ]; then
+        PY="$cand"
+        break
+    fi
+done
+[ -n "$PY" ] || env_broken "no working Python 3 found (python3 may be the Microsoft Store stub; install Python or disable the App execution alias)"
+command -v gh >/dev/null 2>&1 || env_broken "gh CLI not installed (Gate 2 cannot run)"
+command -v npm >/dev/null 2>&1 || env_broken "npm not installed (Gate 1 cannot run)"
+
+# ── Attempt counter (feeds the "gates passed on first try" metric) ──
+# Lives in the git dir so it is never committed and is shared across worktrees.
+ATTEMPTS_DIR="$(git rev-parse --git-common-dir 2>/dev/null || echo .git)/hdd-attempts"
+mkdir -p "$ATTEMPTS_DIR" 2>/dev/null || true
+ATTEMPTS=$(( $(cat "$ATTEMPTS_DIR/$ISSUE_ID" 2>/dev/null || echo 0) + 1 ))
+echo "$ATTEMPTS" > "$ATTEMPTS_DIR/$ISSUE_ID" 2>/dev/null || true
 
 echo ""
 echo "========================================"
@@ -57,37 +81,30 @@ fi
 # ── Gate 2: CI Green ──
 
 echo -n "Gate 2/3 — CI green... "
-if command -v gh &>/dev/null; then
-    BRANCH=$(git branch --show-current 2>/dev/null || echo "")
-    if [ -n "$BRANCH" ]; then
-        CI_STATUS=$(gh run list --branch "$BRANCH" --workflow ci.yml --limit 1 --json conclusion --jq '.[0].conclusion' 2>/dev/null || echo "unknown")
-        if [ "$CI_STATUS" = "success" ]; then
-            echo -e "${GREEN}PASS${NC}"
-            GATES_PASSED=$((GATES_PASSED + 1))
-        elif [ "$CI_STATUS" = "unknown" ] || [ -z "$CI_STATUS" ]; then
-            echo -e "${YELLOW}SKIP (no CI runs found)${NC}"
-            GATES_PASSED=$((GATES_PASSED + 1))
-        else
-            echo -e "${RED}FAIL (last run: $CI_STATUS)${NC}"
-            echo -e "${YELLOW}  Fix: Check GitHub Actions and fix the failing workflow.${NC}"
-        fi
-    else
-        echo -e "${YELLOW}SKIP (not on a branch)${NC}"
+BRANCH=$(git branch --show-current 2>/dev/null || echo "")
+if [ -n "$BRANCH" ]; then
+    CI_STATUS=$(gh run list --branch "$BRANCH" --workflow ci.yml --limit 1 --json conclusion --jq '.[0].conclusion // ""')         || env_broken "'gh run list' failed (gh auth / network?) — Gate 2 cannot run"
+    if [ "$CI_STATUS" = "success" ]; then
+        echo -e "${GREEN}PASS${NC}"
         GATES_PASSED=$((GATES_PASSED + 1))
+    elif [ -z "$CI_STATUS" ]; then
+        echo -e "${YELLOW}SKIP (no completed CI run on this branch)${NC}"
+        GATES_PASSED=$((GATES_PASSED + 1))
+    else
+        echo -e "${RED}FAIL (last run: $CI_STATUS)${NC}"
+        echo -e "${YELLOW}  Fix: Check GitHub Actions and fix the failing workflow.${NC}"
     fi
 else
-    echo -e "${YELLOW}SKIP (gh CLI not installed)${NC}"
+    echo -e "${YELLOW}SKIP (not on a branch)${NC}"
     GATES_PASSED=$((GATES_PASSED + 1))
 fi
 
 # ── Gate 3: Acceptance Criteria ──
 
 echo -n "Gate 3/3 — Acceptance criteria... "
-ISSUE_DATA=$(python3 "$SCRIPT_DIR/linear_client.py" get "$ISSUE_ID" --full 2>/dev/null || echo "")
-if [ -z "$ISSUE_DATA" ]; then
-    echo -e "${YELLOW}SKIP (could not fetch issue)${NC}"
-    GATES_PASSED=$((GATES_PASSED + 1))
-else
+ISSUE_DATA=$("$PY" "$SCRIPT_DIR/linear_client.py" get "$ISSUE_ID" --full)     || env_broken "could not fetch $ISSUE_ID from Linear (LINEAR_API_KEY / network / issue not found) — Gate 3 cannot run"
+[ -n "$ISSUE_DATA" ] || env_broken "Linear returned an empty issue for $ISSUE_ID — Gate 3 cannot run"
+if true; then
     # Count checked and unchecked boxes (Linear uses [X] uppercase)
     UNCHECKED=$(echo "$ISSUE_DATA" | grep -c '\- \[ \]' || true)
     CHECKED=$(echo "$ISSUE_DATA" | grep -ci '\- \[x\]' || true)
@@ -158,8 +175,8 @@ if [ "$GATES_PASSED" -eq "$GATES_TOTAL" ]; then
     CI_RUN_LINK=""
     if command -v gh &>/dev/null && [ -n "$REPO_URL" ]; then
         CI_RUN_JSON=$(gh run list --workflow ci.yml --branch "$BRANCH" --limit 1 --json databaseId,conclusion 2>/dev/null || echo "[]")
-        CI_RUN_ID=$(echo "$CI_RUN_JSON" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d[0]['databaseId'] if d else '')" 2>/dev/null || echo "")
-        CI_STATUS_TEXT=$(echo "$CI_RUN_JSON" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d[0].get('conclusion','unknown') if d else 'unknown')" 2>/dev/null || echo "unknown")
+        CI_RUN_ID=$(echo "$CI_RUN_JSON" | "$PY" -c "import sys,json; d=json.load(sys.stdin); print(d[0]['databaseId'] if d else '')" 2>/dev/null || echo "")
+        CI_STATUS_TEXT=$(echo "$CI_RUN_JSON" | "$PY" -c "import sys,json; d=json.load(sys.stdin); print(d[0].get('conclusion','unknown') if d else 'unknown')" 2>/dev/null || echo "unknown")
         if [ -n "$CI_RUN_ID" ]; then
             CI_RUN_LINK="[CI Run #${CI_RUN_ID}](${REPO_URL}/actions/runs/${CI_RUN_ID})"
         fi
@@ -170,8 +187,8 @@ if [ "$GATES_PASSED" -eq "$GATES_TOTAL" ]; then
     if command -v gh &>/dev/null; then
         PR_JSON=$(gh pr list --state merged --head "$BRANCH" --json number,title --jq '.[0]' 2>/dev/null || echo "")
         if [ -n "$PR_JSON" ] && [ "$PR_JSON" != "null" ]; then
-            PR_NUM=$(echo "$PR_JSON" | python3 -c "import sys,json; print(json.load(sys.stdin).get('number',''))" 2>/dev/null || echo "")
-            PR_TITLE=$(echo "$PR_JSON" | python3 -c "import sys,json; print(json.load(sys.stdin).get('title',''))" 2>/dev/null || echo "")
+            PR_NUM=$(echo "$PR_JSON" | "$PY" -c "import sys,json; print(json.load(sys.stdin).get('number',''))" 2>/dev/null || echo "")
+            PR_TITLE=$(echo "$PR_JSON" | "$PY" -c "import sys,json; print(json.load(sys.stdin).get('title',''))" 2>/dev/null || echo "")
             if [ -n "$PR_NUM" ]; then
                 PR_LINK="[PR #${PR_NUM}: ${PR_TITLE}](${REPO_URL}/pull/${PR_NUM})"
             fi
@@ -179,7 +196,7 @@ if [ "$GATES_PASSED" -eq "$GATES_TOTAL" ]; then
     fi
 
     # Acceptance criteria count
-    ISSUE_FULL=$(python3 "$SCRIPT_DIR/linear_client.py" get "$ISSUE_ID" --full 2>/dev/null || echo "")
+    ISSUE_FULL=$("$PY" "$SCRIPT_DIR/linear_client.py" get "$ISSUE_ID" --full 2>/dev/null || echo "")
     AC_CHECKED=$(echo "$ISSUE_FULL" | grep -ci '\- \[x\]' || true)
     AC_TOTAL=$((AC_CHECKED + $(echo "$ISSUE_FULL" | grep -c '\- \[ \]' || true)))
 
@@ -233,10 +250,12 @@ ${FILES_CHANGED}
 ---
 *Evidencia generada automáticamente por el harness.*"
 
-    python3 "$SCRIPT_DIR/linear_client.py" comment "$ISSUE_ID" "$EVIDENCE" 2>/dev/null || true
+    "$PY" "$SCRIPT_DIR/linear_client.py" comment "$ISSUE_ID" "$EVIDENCE" >/dev/null \
+        || env_broken "could not post the evidence comment to Linear"
 
     # Move to Done
-    python3 "$SCRIPT_DIR/linear_client.py" move "$ISSUE_ID" "Done" 2>/dev/null || true
+    "$PY" "$SCRIPT_DIR/linear_client.py" move "$ISSUE_ID" "Done" >/dev/null \
+        || env_broken "could not move $ISSUE_ID to Done in Linear"
 
     echo "Evidence posted and issue moved to Done."
 
@@ -247,9 +266,9 @@ ${FILES_CHANGED}
     mkdir -p "$VAULT_DIR/_metrics"
     AGENT="${HDD_AGENT:-unassigned}"
     TASK_TYPE="${HDD_TASK_TYPE:-$(echo "$BRANCH" | cut -d/ -f1)}"
-    ISSUE_JSON=$(python3 "$SCRIPT_DIR/linear_client.py" get "$ISSUE_ID" --json 2>/dev/null || echo "{}")
-    ISSUE_TITLE=$(echo "$ISSUE_JSON" | python3 -c "import sys,json; print(json.load(sys.stdin).get('title',''))" 2>/dev/null || echo "")
-    PARENT="${HDD_PARENT:-$(echo "$ISSUE_JSON" | python3 -c "import sys,json; print((json.load(sys.stdin).get('parent') or {}).get('identifier',''))" 2>/dev/null || echo "")}"
+    ISSUE_JSON=$("$PY" "$SCRIPT_DIR/linear_client.py" get "$ISSUE_ID" --json 2>/dev/null || echo "{}")
+    ISSUE_TITLE=$(echo "$ISSUE_JSON" | "$PY" -c "import sys,json; print(json.load(sys.stdin).get('title',''))" 2>/dev/null || echo "")
+    PARENT="${HDD_PARENT:-$(echo "$ISSUE_JSON" | "$PY" -c "import sys,json; print((json.load(sys.stdin).get('parent') or {}).get('identifier',''))" 2>/dev/null || echo "")}"
     if [ "$ATTEMPTS" -eq 1 ]; then GATES_FIRST_TRY=true; else GATES_FIRST_TRY=false; fi
     PR_FM=""
     [ -n "${PR_NUM:-}" ] && PR_FM="#${PR_NUM}"
@@ -283,7 +302,7 @@ ${FILES_CHANGED}
     fi
     echo "Vault note: .claude/vault/$ISSUE_ID.md"
 
-    python3 "$SCRIPT_DIR/agent_performance_log.py" record "$ISSUE_ID"         ${PARENT:+--parent "$PARENT"} --agent "$AGENT" --task-type "$TASK_TYPE"         --gates-first-try "$GATES_FIRST_TRY" --branch "$BRANCH" 2>/dev/null || true
+    "$PY" "$SCRIPT_DIR/agent_performance_log.py" record "$ISSUE_ID"         ${PARENT:+--parent "$PARENT"} --agent "$AGENT" --task-type "$TASK_TYPE"         --gates-first-try "$GATES_FIRST_TRY" --branch "$BRANCH"         || echo "WARNING: agent metrics were NOT recorded (the close itself succeeded)" >&2
 
     rm -f "$ATTEMPTS_DIR/$ISSUE_ID" 2>/dev/null || true
     exit 0
