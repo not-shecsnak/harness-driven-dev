@@ -5,7 +5,8 @@ Uses only stdlib (no pip dependencies).
 
 Usage:
   python scripts/linear_client.py get DEMO-1
-  python scripts/linear_client.py create "Title" ["Description"]
+  python scripts/linear_client.py get DEMO-1 --json
+  python scripts/linear_client.py create "Title" ["Description"] [--parent DEMO-1]
   python scripts/linear_client.py update DEMO-1 "New description"
   python scripts/linear_client.py move DEMO-1 "In Progress"
   python scripts/linear_client.py comment DEMO-1 "Evidence message"
@@ -16,7 +17,7 @@ import sys
 import json
 import urllib.request
 
-API_URL = "https://api.linear.app/graphql"
+API_URL = os.environ.get("LINEAR_API_URL", "https://api.linear.app/graphql")
 
 
 def _load_env():
@@ -83,6 +84,8 @@ def get_issue(issue_id):
                 id identifier title description
                 state { name }
                 priority
+                createdAt startedAt completedAt
+                parent { identifier }
                 labels { nodes { name } }
             }
         }
@@ -105,6 +108,8 @@ def get_issue(issue_id):
                                 id identifier title description
                                 state { name }
                                 priority
+                                createdAt startedAt completedAt
+                                parent { identifier }
                                 labels { nodes { name } }
                             }
                         }
@@ -246,11 +251,19 @@ def _get_team_id(team_key="DEMO"):
     return teams[0]["id"]
 
 
-def create_issue(title, description=None, team_key="DEMO"):
-    """Create a new issue in Linear. Returns the issue dict or None."""
+def create_issue(title, description=None, team_key="DEMO", parent_id=None):
+    """Create a new issue in Linear (optionally a sub-issue). Returns the issue dict or None."""
     team_id = _get_team_id(team_key)
     if not team_id:
         return None
+
+    parent_uuid = None
+    if parent_id:
+        parent = get_issue(parent_id)
+        if not parent:
+            print(f"Parent issue {parent_id} not found.", file=sys.stderr)
+            return None
+        parent_uuid = parent["id"]
 
     variables = {
         "title": title,
@@ -265,6 +278,11 @@ def create_issue(title, description=None, team_key="DEMO"):
         variables["description"] = description
         input_fields += ", description: $description"
         var_defs += ", $description: String"
+
+    if parent_uuid:
+        variables["parentId"] = parent_uuid
+        input_fields += ", parentId: $parentId"
+        var_defs += ", $parentId: String"
 
     result = _query(f"""
         mutation({var_defs}) {{
@@ -313,7 +331,9 @@ def main():
             sys.exit(1)
         full = "--full" in sys.argv
         issue = get_issue(sys.argv[2])
-        if issue:
+        if issue and "--json" in sys.argv:
+            print(json.dumps(issue))
+        elif issue:
             _print_issue(issue, full=full)
         else:
             print(f"Issue {sys.argv[2]} not found.")
@@ -333,10 +353,15 @@ def main():
         if len(sys.argv) < 3:
             print('Usage: linear_client.py create "<TITLE>" ["<DESCRIPTION>"]')
             sys.exit(1)
+        parent_id = None
+        if "--parent" in sys.argv:
+            idx = sys.argv.index("--parent")
+            parent_id = sys.argv[idx + 1] if idx + 1 < len(sys.argv) else None
+            del sys.argv[idx:idx + 2]
         title = sys.argv[2]
         description = sys.argv[3] if len(sys.argv) > 3 else None
         team_key = os.environ.get("LINEAR_TEAM_KEY", "DEMO")
-        issue = create_issue(title, description, team_key)
+        issue = create_issue(title, description, team_key, parent_id)
         if issue:
             print(f"Created: {issue['identifier']}  {issue['title']}")
             print(f"  URL: {issue.get('url', 'N/A')}")

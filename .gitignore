@@ -3,3 +3,6 @@
 node_modules/
 __pycache__/
 .DS_Store
+
+# Obsidian app config is per-user; the .md notes ARE versioned
+.claude/vault/.obsidian/
