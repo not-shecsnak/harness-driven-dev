@@ -82,21 +82,32 @@ fi
 
 echo -n "Gate 2/3 — CI green... "
 BRANCH=$(git branch --show-current 2>/dev/null || echo "")
-if [ -n "$BRANCH" ]; then
-    CI_STATUS=$(gh run list --branch "$BRANCH" --workflow ci.yml --limit 1 --json conclusion --jq '.[0].conclusion // ""')         || env_broken "'gh run list' failed (gh auth / network?) — Gate 2 cannot run"
-    if [ "$CI_STATUS" = "success" ]; then
-        echo -e "${GREEN}PASS${NC}"
-        GATES_PASSED=$((GATES_PASSED + 1))
-    elif [ -z "$CI_STATUS" ]; then
-        echo -e "${YELLOW}SKIP (no completed CI run on this branch)${NC}"
-        GATES_PASSED=$((GATES_PASSED + 1))
-    else
-        echo -e "${RED}FAIL (last run: $CI_STATUS)${NC}"
-        echo -e "${YELLOW}  Fix: Check GitHub Actions and fix the failing workflow.${NC}"
-    fi
+if [ -z "$BRANCH" ]; then
+    echo -e "${RED}FAIL (detached HEAD: cannot tell which CI run applies)${NC}"
+    echo -e "${YELLOW}  Fix: Check out the issue branch (or main) and run again.${NC}"
 else
-    echo -e "${YELLOW}SKIP (not on a branch)${NC}"
-    GATES_PASSED=$((GATES_PASSED + 1))
+    CI_JSON=$(gh run list --branch "$BRANCH" --workflow ci.yml --limit 1 --json status,conclusion) \
+        || env_broken "'gh run list' failed (gh auth / network?) — Gate 2 cannot run"
+    CI_STATE=$(echo "$CI_JSON" | "$PY" -c "import sys,json; d=json.load(sys.stdin); print((d[0].get('status','') + '/' + (d[0].get('conclusion') or '')) if d else 'none')") \
+        || env_broken "could not parse the 'gh run list' output — Gate 2 cannot run"
+    case "$CI_STATE" in
+        completed/success)
+            echo -e "${GREEN}PASS${NC}"
+            GATES_PASSED=$((GATES_PASSED + 1))
+            ;;
+        none)
+            echo -e "${RED}FAIL (no CI run found for branch '$BRANCH')${NC}"
+            echo -e "${YELLOW}  Fix: Push the branch and wait for CI (are GitHub Actions enabled on this repo/fork?).${NC}"
+            ;;
+        completed/*)
+            echo -e "${RED}FAIL (last run: ${CI_STATE#completed/})${NC}"
+            echo -e "${YELLOW}  Fix: Check GitHub Actions and fix the failing workflow.${NC}"
+            ;;
+        *)
+            echo -e "${RED}FAIL (CI still running: ${CI_STATE%%/*})${NC}"
+            echo -e "${YELLOW}  Fix: Wait for the CI run to finish, then run again.${NC}"
+            ;;
+    esac
 fi
 
 # ── Gate 3: Acceptance Criteria ──
@@ -111,8 +122,8 @@ if true; then
     TOTAL=$((UNCHECKED + CHECKED))
 
     if [ "$TOTAL" -eq 0 ]; then
-        echo -e "${YELLOW}SKIP (no checkboxes found in issue description)${NC}"
-        GATES_PASSED=$((GATES_PASSED + 1))
+        echo -e "${RED}FAIL (no acceptance criteria: the issue has no '- [ ]' checkboxes)${NC}"
+        echo -e "${YELLOW}  Fix: Add the acceptance criteria as checkboxes in Linear and tick them when done.${NC}"
     elif [ "$UNCHECKED" -gt 0 ]; then
         echo -e "${RED}FAIL ($UNCHECKED/$TOTAL unchecked criteria)${NC}"
         echo -e "${YELLOW}  Fix: Complete all acceptance criteria checkboxes in Linear.${NC}"
@@ -260,15 +271,27 @@ ${FILES_CHANGED}
     echo "Evidence posted and issue moved to Done."
 
     # ── Obsidian vault note + agent metrics (best effort, never blocks the close) ──
-    # Context comes from the orchestrator via env: HDD_AGENT, HDD_PARENT, HDD_TASK_TYPE
+    # Context: env HDD_AGENT / HDD_PARENT / HDD_TASK_TYPE if set, else the parent note's assignment table.
     REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
     VAULT_DIR="$REPO_ROOT/.claude/vault"
     mkdir -p "$VAULT_DIR/_metrics"
-    AGENT="${HDD_AGENT:-unassigned}"
-    TASK_TYPE="${HDD_TASK_TYPE:-$(echo "$BRANCH" | cut -d/ -f1)}"
     ISSUE_JSON=$("$PY" "$SCRIPT_DIR/linear_client.py" get "$ISSUE_ID" --json 2>/dev/null || echo "{}")
     ISSUE_TITLE=$(echo "$ISSUE_JSON" | "$PY" -c "import sys,json; print(json.load(sys.stdin).get('title',''))" 2>/dev/null || echo "")
     PARENT="${HDD_PARENT:-$(echo "$ISSUE_JSON" | "$PY" -c "import sys,json; print((json.load(sys.stdin).get('parent') or {}).get('identifier',''))" 2>/dev/null || echo "")}"
+    AGENT="${HDD_AGENT:-}"
+    TASK_TYPE="${HDD_TASK_TYPE:-}"
+    # Without env context, read the assignment /plan-feature wrote in the parent note:
+    #   | [[ISSUE-ID]] | agent-developer | feat |
+    PARENT_NOTE="$VAULT_DIR/$PARENT.md"
+    if { [ -z "$AGENT" ] || [ -z "$TASK_TYPE" ]; } && [ -n "$PARENT" ] && [ -f "$PARENT_NOTE" ]; then
+        ROW=$(grep -F "[[$ISSUE_ID]]" "$PARENT_NOTE" | grep '^|' | head -1 || true)
+        ROW_AGENT=$(echo "$ROW" | awk -F'|' '{gsub(/^ +| +$/, "", $3); print $3}')
+        ROW_TYPE=$(echo "$ROW" | awk -F'|' '{gsub(/^ +| +$/, "", $4); print $4}')
+        AGENT="${AGENT:-$ROW_AGENT}"
+        TASK_TYPE="${TASK_TYPE:-$ROW_TYPE}"
+    fi
+    AGENT="${AGENT:-unassigned}"
+    TASK_TYPE="${TASK_TYPE:-$(echo "$BRANCH" | cut -d/ -f1)}"
     if [ "$ATTEMPTS" -eq 1 ]; then GATES_FIRST_TRY=true; else GATES_FIRST_TRY=false; fi
     PR_FM=""
     [ -n "${PR_NUM:-}" ] && PR_FM="#${PR_NUM}"
