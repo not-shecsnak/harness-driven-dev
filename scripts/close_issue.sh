@@ -49,6 +49,15 @@ for cand in python3 python; do
 done
 [ -n "$PY" ] || env_broken "no working Python 3 found (python3 may be the Microsoft Store stub; install Python or disable the App execution alias)"
 command -v gh >/dev/null 2>&1 || env_broken "gh CLI not installed (Gate 2 cannot run)"
+# gh resolves its default repo from `gh repo set-default`, which in a fork can be the
+# UPSTREAM repo — Gate 2 would then read someone else's CI. Pin it to this clone's origin.
+if [ -z "${GH_REPO:-}" ]; then
+    ORIGIN_URL=$(git remote get-url origin 2>/dev/null || true)
+    if [ -n "$ORIGIN_URL" ]; then
+        GH_REPO=$(echo "$ORIGIN_URL" | sed -E 's#\.git$##; s#^(git@github\.com:|https://github\.com/|ssh://git@github\.com/)##')
+        export GH_REPO
+    fi
+fi
 command -v npm >/dev/null 2>&1 || env_broken "npm not installed (Gate 1 cannot run)"
 
 # ── Attempt counter (feeds the "gates passed on first try" metric) ──
