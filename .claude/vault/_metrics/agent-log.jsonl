@@ -1,1 +1,4 @@
 {"date": "2026-10-01T16:20:28Z", "ticket": "TY-10", "parent": null, "agent": "agent-orchestrator", "task_type": "feature-rollup", "gates_first_try": false, "cycle_hours": 8.84, "pr_first_review_approved": null}
+{"date": "2026-10-01T16:23:46Z", "ticket": "TY-12", "parent": "TY-11", "agent": "agent-architect", "task_type": "docs", "gates_first_try": true, "cycle_hours": 0.01, "pr_first_review_approved": null}
+{"date": "2026-10-01T16:24:08Z", "ticket": "TY-13", "parent": "TY-11", "agent": "agent-developer", "task_type": "feat", "gates_first_try": true, "cycle_hours": 0.01, "pr_first_review_approved": null}
+{"date": "2026-10-01T16:24:21Z", "ticket": "TY-11", "parent": null, "agent": "agent-orchestrator", "task_type": "feature-rollup", "gates_first_try": true, "cycle_hours": 0.02, "pr_first_review_approved": null}
