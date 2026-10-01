@@ -48,6 +48,10 @@ for cand in python3 python; do
     fi
 done
 [ -n "$PY" ] || env_broken "no working Python 3 found (python3 may be the Microsoft Store stub; install Python or disable the App execution alias)"
+# Linear titles/descriptions are UTF-8; without this, Windows consoles re-encode them
+# (cp1252) and the vault notes end up with invalid characters.
+export PYTHONIOENCODING=utf-8 PYTHONUTF8=1
+
 command -v gh >/dev/null 2>&1 || env_broken "gh CLI not installed (Gate 2 cannot run)"
 # gh resolves its default repo from `gh repo set-default`, which in a fork can be the
 # UPSTREAM repo — Gate 2 would then read someone else's CI. Pin it to this clone's origin.
