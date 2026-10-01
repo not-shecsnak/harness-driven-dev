@@ -11,7 +11,7 @@ through automated enforcement.
 
 ## Skills
 
-The agent has 5 skills that connect with the harness:
+The agent has 6 skills that connect with the harness:
 
 | Skill | When to use |
 |-------|-------------|
@@ -20,6 +20,7 @@ The agent has 5 skills that connect with the harness:
 | `/close-issue DEMO-X` | ALWAYS to finish work. Runs 3 gates (tests + CI + criteria), posts evidence, moves to Done. |
 | `/fix-secret` | When gitleaks blocks a commit. Moves the secret to env, asks the user to populate `.env`, WAITS for confirmation before retrying. |
 | `/status` | Check project dashboard: issues, branch, CI status. |
+| `/agent-metrics` | Per-agent table: tickets closed, avg cycle time, % gates passed first try. |
 
 > **Note**: `DEMO-X` is used as an example. Replace with your actual Linear team key prefix (e.g., `HAR-5`, `EXP-1`). The team key is set when you create your team in Linear.
 

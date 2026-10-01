@@ -11,7 +11,8 @@
       "Skill(create-issue *)",
       "Skill(start-issue *)",
       "Skill(close-issue *)",
-      "Skill(status)"
+      "Skill(status)",
+      "Skill(agent-metrics)"
     ]
   },
   "hooks": {

@@ -27,7 +27,11 @@ Close Linear issue `$ARGUMENTS` with mechanical verification.
    - Moves issue to "Done"
    - Report: `Issue $0 closed with evidence.`
 
-3. **If ANY gate fails**:
+3. **If the environment is broken** (exit code 2: no working Python 3, `gh`/Linear unreachable):
+   - Report the "ENVIRONMENT BROKEN" message verbatim; the issue is NOT closed
+   - Do not retry blindly or bypass: fix the environment first
+
+4. **If ANY gate fails** (exit code 1):
    - Report which gate failed and why
    - Do NOT close the issue
    - Suggest what the user needs to fix
