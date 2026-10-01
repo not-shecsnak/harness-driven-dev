@@ -3,7 +3,7 @@
 # close_issue.sh — Harness gate script for closing Linear issues.
 #
 # Runs 3 gates before allowing an issue to be closed:
-#   Gate 1: Tests passing (npm test)
+#   Gate 1: Tests passing (HDD_TEST_CMD, default: npm test --silent)
 #   Gate 2: CI green (last GitHub Actions run)
 #   Gate 3: Acceptance criteria checked (Linear API)
 #
@@ -62,7 +62,23 @@ if [ -z "${GH_REPO:-}" ]; then
         export GH_REPO
     fi
 fi
-command -v npm >/dev/null 2>&1 || env_broken "npm not installed (Gate 1 cannot run)"
+# Per-project knobs (defaults keep the original behaviour):
+#   HDD_TEST_CMD     command for Gate 1            (default: npm test --silent)
+#   HDD_CI_WORKFLOW  workflow file read by Gate 2  (default: ci.yml)
+# Optional per-project config: <repo>/.claude/hdd.conf with KEY=value lines (env vars win).
+HDD_CONF="$SCRIPT_DIR/../.claude/hdd.conf"
+if [ -f "$HDD_CONF" ]; then
+    for key in HDD_TEST_CMD HDD_CI_WORKFLOW; do
+        if [ -z "${!key:-}" ]; then
+            val=$(grep -E "^${key}=" "$HDD_CONF" | head -1 | cut -d= -f2- | tr -d '' || true)
+            if [ -n "$val" ]; then export "$key=$val"; fi
+        fi
+    done
+fi
+TEST_CMD="${HDD_TEST_CMD:-npm test --silent}"
+CI_WORKFLOW="${HDD_CI_WORKFLOW:-ci.yml}"
+TEST_BIN="${TEST_CMD%% *}"
+command -v "$TEST_BIN" >/dev/null 2>&1 || env_broken "'$TEST_BIN' not installed (Gate 1 cannot run; set HDD_TEST_CMD for this project)"
 
 # ── Attempt counter (feeds the "gates passed on first try" metric) ──
 # Lives in the git dir so it is never committed and is shared across worktrees.
@@ -83,12 +99,12 @@ GATES_TOTAL=3
 # ── Gate 1: Tests ──
 
 echo -n "Gate 1/3 — Tests passing... "
-if npm test --silent 2>/dev/null; then
+if bash -c "$TEST_CMD" >/dev/null 2>&1; then
     echo -e "${GREEN}PASS${NC}"
     GATES_PASSED=$((GATES_PASSED + 1))
 else
     echo -e "${RED}FAIL${NC}"
-    echo -e "${YELLOW}  Fix: Run 'npm test' and fix failing tests.${NC}"
+    echo -e "${YELLOW}  Fix: Run '$TEST_CMD' and fix failing tests.${NC}"
 fi
 
 # ── Gate 2: CI Green ──
@@ -99,7 +115,7 @@ if [ -z "$BRANCH" ]; then
     echo -e "${RED}FAIL (detached HEAD: cannot tell which CI run applies)${NC}"
     echo -e "${YELLOW}  Fix: Check out the issue branch (or main) and run again.${NC}"
 else
-    CI_JSON=$(gh run list --branch "$BRANCH" --workflow ci.yml --limit 1 --json status,conclusion) \
+    CI_JSON=$(gh run list --branch "$BRANCH" --workflow "$CI_WORKFLOW" --limit 1 --json status,conclusion) \
         || env_broken "'gh run list' failed (gh auth / network?) — Gate 2 cannot run"
     CI_STATE=$(echo "$CI_JSON" | "$PY" -c "import sys,json; d=json.load(sys.stdin); print((d[0].get('status','') + '/' + (d[0].get('conclusion') or '')) if d else 'none')") \
         || env_broken "could not parse the 'gh run list' output — Gate 2 cannot run"
@@ -190,7 +206,7 @@ if [ "$GATES_PASSED" -eq "$GATES_TOTAL" ]; then
     FILES_COUNT=$(echo "$FILES_CHANGED" | grep -c '.' 2>/dev/null || echo "0")
 
     # Test results
-    TEST_OUTPUT=$(npm test 2>&1 || true)
+    TEST_OUTPUT=$(bash -c "$TEST_CMD" 2>&1 || true)
     TESTS_PASSED=$(echo "$TEST_OUTPUT" | grep -oE '[0-9]+ passed' || echo "unknown")
     TESTS_FAILED=$(echo "$TEST_OUTPUT" | grep -oE '[0-9]+ failed' || echo "0 failed")
 
@@ -198,7 +214,7 @@ if [ "$GATES_PASSED" -eq "$GATES_TOTAL" ]; then
     CI_STATUS_TEXT="unknown"
     CI_RUN_LINK=""
     if command -v gh &>/dev/null && [ -n "$REPO_URL" ]; then
-        CI_RUN_JSON=$(gh run list --workflow ci.yml --branch "$BRANCH" --limit 1 --json databaseId,conclusion 2>/dev/null || echo "[]")
+        CI_RUN_JSON=$(gh run list --workflow "$CI_WORKFLOW" --branch "$BRANCH" --limit 1 --json databaseId,conclusion 2>/dev/null || echo "[]")
         CI_RUN_ID=$(echo "$CI_RUN_JSON" | "$PY" -c "import sys,json; d=json.load(sys.stdin); print(d[0]['databaseId'] if d else '')" 2>/dev/null || echo "")
         CI_STATUS_TEXT=$(echo "$CI_RUN_JSON" | "$PY" -c "import sys,json; d=json.load(sys.stdin); print(d[0].get('conclusion','unknown') if d else 'unknown')" 2>/dev/null || echo "unknown")
         if [ -n "$CI_RUN_ID" ]; then
